@@ -137,19 +137,18 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                 for i in range(y, y + h):
                     self.hline(x, i, w, c)
 
+            # NOTE: formal params x and y are offsets from the top left corner of the screen
             def text(self, text, x, y, c=1):
                 fontFile = open("font-pet-me-128.dat", "rb")
                 font = bytearray(fontFile.read())
-                for text_index in range(0, len(text)):
-                    ind = 0
+                for text_index in range(len(text)):
                     for col in range(8):
-                        fontDataPixelValues = font[(
+                        col_pixel_values = font[(
                             ord(text[text_index])-32)*8 + col]
-                        #ind = text_index * 8 + x * 8 + y * 128 + col
-                        for i in range(0, 7):
-                            if fontDataPixelValues & 1 << i != 0:
+                        for i in range(7):
+                            if col_pixel_values & 1 << i:
                                 x_coordinate = x + col + text_index * 8
-                                y_coordinate = y+i
+                                y_coordinate = y + i
                                 if x_coordinate < WIDTH and y_coordinate < HEIGHT:
                                     self.pixel(x_coordinate, y_coordinate, c)
 
