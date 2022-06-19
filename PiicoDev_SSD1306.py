@@ -11,6 +11,13 @@
 # 2021 OCT 14 - Initial release
 # 2022 JAN 04 - Remove dependency on PIL module.  Improve compatibility with pbm files.
 
+from math import cos, sin, radians
+from nis import match
+from construct import Switch
+
+from requests import check_compatibility
+from PiicoDev_Unified import *
+
 _SET_CONTRAST = 0x81
 _SET_ENTIRE_ON = 0xA4
 _SET_NORM_INV = 0xA6
@@ -29,13 +36,16 @@ _SET_DISP_CLK_DIV = 0xD5
 _SET_PRECHARGE = 0xD9
 _SET_VCOM_DESEL = 0xDB
 _SET_CHARGE_PUMP = 0x8D
+
+BUFFER_START_ADDR = int.from_bytes(b'\x80', 'big')
+DEFAULT_ADDR = 0x3C
 WIDTH = 128
 HEIGHT = 64
+# The display is of size 128x64 pixels, this is 'divided' into a collection of 16x8 '8x8 pages'
+PAGE_EDGE = 8
 
-from PiicoDev_Unified import *
-from math import cos, sin, radians
 
-compat_str = '\nUnified PiicoDev library out of date.  Get the latest module: https://piico.dev/unified \n'
+COMPATIBILITY_WARNING = '\nUnified PiicoDev library out of date.  Get the latest module: https://piico.dev/unified\n'
 
 _SYSNAME = os.uname().sysname
 
@@ -67,14 +77,16 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                     for i in range(len(self.buffer)):
                         self.buffer[i] = 0xFF
 
-            def pixel(self, x, y, color):
+            def pixel(self, x, y, c):
                 x = x & (WIDTH - 1)
                 y = y & (HEIGHT - 1)
-                page, shift_page = divmod(y, 8)
-                ind = x + page * 128
-                b = self.buffer[ind] | (
-                    1 << shift_page) if color else self.buffer[ind] & ~ (1 << shift_page)
-                pack_into(">B", self.buffer, ind, b)
+                page, offset = divmod(y, PAGE_EDGE)
+                i = x + page * WIDTH
+                if c:
+                    b = self.buffer[i] | (1 << offset)
+                else:
+                    b = self.buffer[i] & ~ (1 << offset)
+                pack_into(">B", self.buffer, i, b)
                 self._set_pos(x, page)
 
             def line(self, x1, y1, x2, y2, c):
@@ -127,27 +139,30 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
             def vline(self, x, y, h, c):
                 self.line(x, y, x, y + h, c)
 
-            def rect(self, x, y, w, h, c):
+            # Draw the perimeter of a rectangle to the display
+            def rect(self, x, y, w, h, c=1):
                 self.hline(x, y, w, c)
                 self.hline(x, y+h, w, c)
                 self.vline(x, y, h, c)
                 self.vline(x+w, y, h, c)
 
-            def fill_rect(self, x, y, w, h, c):
+            # Draw a solid rectangle to the display
+            def fill_rect(self, x, y, w, h, c=1):
                 for i in range(y, y + h):
                     self.hline(x, i, w, c)
 
             # NOTE: formal params x and y are offsets from the top left corner of the screen
+            # TODO: time complexity of barometer statement if (page_pixel_values & 1 << i): is O((text length) * PAGE_EDGE * 7) == OHM((text length) * PAGE_EDGE * 7) which is highly inefficient
             def text(self, text, x, y, c=1):
                 fontFile = open("font-pet-me-128.dat", "rb")
                 font = bytearray(fontFile.read())
                 for text_index in range(len(text)):
-                    for col in range(8):
-                        col_pixel_values = font[(
-                            ord(text[text_index])-32)*8 + col]
+                    for page in range(PAGE_EDGE):
+                        page_pixel_values = font[(
+                            ord(text[text_index])-32)*PAGE_EDGE + page]
                         for i in range(7):
-                            if col_pixel_values & 1 << i:
-                                x_coordinate = x + col + text_index * 8
+                            if (page_pixel_values & 1 << i):
+                                x_coordinate = x + page + text_index * 8
                                 y_coordinate = y + i
                                 if x_coordinate < WIDTH and y_coordinate < HEIGHT:
                                     self.pixel(x_coordinate, y_coordinate, c)
@@ -155,9 +170,10 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
 
 class PiicoDev_SSD1306(framebuf.FrameBuffer):
     def init_display(self):
+        # NOTE: self.width and self.height are largely unused in this implementation
         self.width = WIDTH
         self.height = HEIGHT
-        self.pages = HEIGHT // 8
+        self.pages = HEIGHT // PAGE_EDGE
         self.buffer = bytearray(self.pages * WIDTH)
         for cmd in (
             _SET_DISP,  # display off
@@ -213,25 +229,25 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
         self.write_cmd(_SET_SEG_REMAP | (rotate & 1))
 
     def show(self):
-        x0 = 0
-        x1 = WIDTH - 1
         self.write_cmd(_SET_COL_ADDR)
-        self.write_cmd(x0)
-        self.write_cmd(x1)
+        self.write_cmd(0)  # set row start
+        self.write_cmd(WIDTH - 1)  # set row end
         self.write_cmd(_SET_PAGE_ADDR)
-        self.write_cmd(0)
-        self.write_cmd(self.pages - 1)
+        self.write_cmd(0)  # set page start
+        self.write_cmd(self.pages - 1)  # set page end
         self.write_data(self.buffer)
 
     def write_cmd(self, cmd):
         try:
-            self.i2c.writeto_mem(self.addr, int.from_bytes(
-                b'\x80', 'big'), bytes([cmd]))
+            self.i2c.writeto_mem(self.addr, BUFFER_START_ADDR, bytes([cmd]))
             self.comms_err = False
         except:
             print(i2c_err_str.format(self.addr))
             self.comms_err = True
 
+    # ! Mark for reviewer - What is the difference between write_data and write_cmd.
+    # ! The value of write_list[0] is never redefined and equal to BUFFER_START_ADDR,
+    # ! other than buf being defined as an element of an array this is identical to write_cmd?
     def write_data(self, buf):
         try:
             self.write_list[1] = buf
@@ -269,8 +285,8 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
             while line.startswith(b'#') is True:
                 line = f.readline()
             data_piicodev = bytearray(f.read())
-        for byte in range(WIDTH // 8 * HEIGHT):
-            for bit in range(8):
+        for byte in range(WIDTH // PAGE_EDGE * HEIGHT):
+            for bit in range(PAGE_EDGE):
                 if data_piicodev[byte] & 1 << bit != 0:
                     x_coordinate = ((8-bit) + (byte * 8)) % WIDTH
                     y_coordinate = byte * 8 // WIDTH
@@ -310,7 +326,7 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
 
 
 class PiicoDev_SSD1306_MicroPython(PiicoDev_SSD1306):
-    def __init__(self, bus=None, freq=None, sda=None, scl=None, addr=0x3C):
+    def __init__(self, bus=None, freq=None, sda=None, scl=None, addr=DEFAULT_ADDR):
         self.i2c = create_unified_i2c(bus=bus, freq=freq, sda=sda, scl=scl)
         self.addr = addr
         self.temp = bytearray(2)
@@ -322,7 +338,7 @@ class PiicoDev_SSD1306_MicroPython(PiicoDev_SSD1306):
 
 
 class PiicoDev_SSD1306_MicroBit(PiicoDev_SSD1306):
-    def __init__(self, bus=None, freq=None, sda=None, scl=None, addr=0x3C):
+    def __init__(self, bus=None, freq=None, sda=None, scl=None, addr=DEFAULT_ADDR):
         self.i2c = create_unified_i2c(bus=bus, freq=freq, sda=sda, scl=scl)
         self.addr = addr
         self.temp = bytearray(2)
@@ -333,7 +349,7 @@ class PiicoDev_SSD1306_MicroBit(PiicoDev_SSD1306):
 
 
 class PiicoDev_SSD1306_Linux(PiicoDev_SSD1306):
-    def __init__(self, bus=None, freq=None, sda=None, scl=None, addr=0x3C):
+    def __init__(self, bus=None, freq=None, sda=None, scl=None, addr=DEFAULT_ADDR):
         self.i2c = create_unified_i2c(bus=bus, freq=freq, sda=sda, scl=scl)
         self.addr = addr
         self.temp = bytearray(2)
@@ -343,26 +359,30 @@ class PiicoDev_SSD1306_Linux(PiicoDev_SSD1306):
         self.show()
 
 
-def create_PiicoDev_SSD1306(address=0x3C, bus=None, freq=None, sda=None, scl=None, asw=None):
-    if asw == 0:
-        _a = 0x3C
-    elif asw == 1:
-        _a = 0x3D
-    else:
-        # parse desired address from direct address input or asw switch position (0 or 1)
-        _a = address
+def create_PiicoDev_SSD1306(addr=None, bus=None, freq=None, sda=None, scl=None, addr_switch=None):
+    addr = determine_addr(addr, addr_switch)
+    check_compatibility()
+    if _SYSNAME == 'microbit':
+        return PiicoDev_SSD1306_MicroBit(addr=addr, freq=freq)
+    if _SYSNAME == 'linux':
+        return PiicoDev_SSD1306_Linux(addr=addr, freq=freq)
+    return PiicoDev_SSD1306_MicroPython(addr=addr, bus=bus, freq=freq, sda=sda, scl=scl)
+
+
+def determine_addr(addr, addr_switch):
+    if addr == None:
+        if addr_switch == 1 | addr_switch == True:
+            return DEFAULT_ADDR + 1
+        else:
+            return DEFAULT_ADDR
+    return addr
+
+
+def check_compatibility():
     try:
         if compat_ind >= 1:
             pass
         else:
-            print(compat_str)
+            print(COMPATIBILITY_WARNING)
     except:
-        print(compat_str)
-    if _SYSNAME == 'microbit':
-        display = PiicoDev_SSD1306_MicroBit(addr=_a, freq=freq)
-    elif _SYSNAME == 'Linux':
-        display = PiicoDev_SSD1306_Linux(addr=_a, freq=freq)
-    else:
-        display = PiicoDev_SSD1306_MicroPython(
-            addr=_a, bus=bus, freq=freq, sda=sda, scl=scl)
-    return display
+        print(COMPATIBILITY_WARNING)
