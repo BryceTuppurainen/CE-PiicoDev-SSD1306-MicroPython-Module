@@ -46,6 +46,7 @@ PAGE_EDGE = 8
 
 
 COMPATIBILITY_WARNING = '\nUnified PiicoDev library out of date.  Get the latest module: https://piico.dev/unified\n'
+FILE_EXCEPTION_WARNING = '\nThere was an unexpected error reading the file\nPlease confirm that the file exists, is valid, and is readable\n'
 
 _SYSNAME = os.uname().sysname
 
@@ -61,6 +62,7 @@ else:
 if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
     class framebuf:
         class FrameBuffer():
+
             # Framebuffer manipulation, used by Microbit and Linux
             def _set_pos(self, col=0, page=0):
                 self.write_cmd(0xb0 | page)  # page number
@@ -152,20 +154,36 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                     self.hline(x, i, w, c)
 
             # NOTE: formal params x and y are offsets from the top left corner of the screen
-            # TODO: time complexity of barometer statement if (page_pixel_values & 1 << i): is O((text length) * PAGE_EDGE * 7) == OHM((text length) * PAGE_EDGE * 7) which is highly inefficient
+            # TODO(Bryce): time complexity of barometer statement if (page_pixel_values & 1 << i):
+            # TODO(Bryce): Is O((text length) * PAGE_EDGE * 7), OHM((text length) * PAGE_EDGE * 7) which is highly inefficient
+            # TODO(Bryce WIP)
             def text(self, text, x, y, c=1):
-                fontFile = open("font-pet-me-128.dat", "rb")
+                if self.character_representations is None:
+                    self.get_character_representations()
+
+                for char in text:  # For each character
+                    character_pixels = self.character_representations[ord(
+                        char)]
+                    for i in range(7):
+                        if (character_pixels & 1 << i):
+                            x_coordinate = x + col + text_index * 8
+                            y_coordinate = y + i
+                            if x_coordinate < WIDTH and y_coordinate < HEIGHT:
+                                self.pixel(x_coordinate, y_coordinate, c)
+
+            # Stores the bytearray representations for each legal character mapped in the object character_representations
+            def get_character_representations(self):
+                self.character_representations = {}
+                try:
+                    fontFile = open("font-pet-me-128.dat", "rb")
+                except:
+                    print(FILE_EXCEPTION_WARNING)
                 font = bytearray(fontFile.read())
-                for text_index in range(len(text)):
-                    for page in range(PAGE_EDGE):
-                        page_pixel_values = font[(
-                            ord(text[text_index])-32)*PAGE_EDGE + page]
-                        for i in range(7):
-                            if (page_pixel_values & 1 << i):
-                                x_coordinate = x + page + text_index * 8
-                                y_coordinate = y + i
-                                if x_coordinate < WIDTH and y_coordinate < HEIGHT:
-                                    self.pixel(x_coordinate, y_coordinate, c)
+                for char in range(32, 126):
+                    for col in range(8):
+                        self.character_representations[char] = font[(
+                            char-32)*8 + col]
+                fontFile.close()
 
 
 class PiicoDev_SSD1306(framebuf.FrameBuffer):
