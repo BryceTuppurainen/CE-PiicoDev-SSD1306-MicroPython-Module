@@ -11,12 +11,11 @@
 # 2021 OCT 14 - Initial release
 # 2022 JAN 04 - Remove dependency on PIL module.  Improve compatibility with pbm files.
 
-from math import cos, sin, radians
-from nis import match
-from construct import Switch
-from numpy import character
 
-from requests import check_compatibility
+from math import cos, sin, radians
+# NOTE: Pylint Error: <- potential optimization: sleep_ms, I2CBase,
+# I2CUnifiedMachine, I2CUnifiedMicroBit, I2CUnifiedLinux, i2c,
+# SMBus, i2c_msg, sleep, ceil and I2C unused from wildcard import
 from PiicoDev_Unified import *
 
 _SET_CONTRAST = 0x81
@@ -45,8 +44,6 @@ HEIGHT = 64
 # The display is of size 128x64 pixels, this is 'divided' into a collection of 16x8 '8x8 pages'
 PAGE_EDGE = 8
 
-
-COMPATIBILITY_WARNING = '\nUnified PiicoDev library out of date.  Get the latest module: https://piico.dev/unified\n'
 FILE_EXCEPTION_WARNING = '\nThere was an unexpected error reading the file\nPlease confirm that the file exists, is valid, and is readable\n'
 
 _SYSNAME = os.uname().sysname
@@ -58,14 +55,28 @@ if _SYSNAME == 'microbit':
 elif _SYSNAME == 'Linux':
     from struct import pack_into
 else:
-    import framebuf
+    import framebuf as Framebuf
 
 if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
-    class framebuf:
+    class Framebuf:
+        """
+        TODO: Framebuf should have a docstring specified here
+        """
+
         class FrameBuffer():
 
-            # Framebuffer manipulation, used by Microbit and Linux
+            def __init__(self):
+                # ! Note for reviewer: This call to the superclass isn't 'needed'
+                # ! however, it is typically best practice as this way independant of version or
+                # ! environment (as well as for static analysis) it is clear where and when the
+                # ! class is initialised with the properties of super
+                super().__init__()
+                self.char_cols = {}
+
             def _set_pos(self, col=0, page=0):
+                """
+                Framebuffer manipulation, used by Microbit and Linux
+                """
                 self.write_cmd(0xb0 | page)  # page number
                 # take upper and lower value of col * 2
                 c1, c2 = col * 2 & 0x0F, col >> 3
@@ -169,32 +180,35 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
 
             # Stores the bytearray representations for each legal character mapped in the object char_cols
             def get_char_cols(self):
-                try:
-                    self.char_cols
-                except NameError:  # If char_cols is not yet initialized, then initialize it, otherwise do nothing i.e. a Python is_defined Singleton pattern
-                    self.char_cols = {}
+                if (self.char_cols == {}):
                     try:
-                        font_file = open("font-pet-me-128.dat", "rb")
-                        font = bytearray(font_file.read())
-                        for char in range(32, 127):
-                            self.char_cols[chr(char)] = []
-                            # Store the byte representation for each column
-                            for col in range(8):
-                                self.char_cols[chr(char)].append(
-                                    font[(char-32)*8 + col])
-                    except:
+                        with open("font-pet-me-128.dat", "rb") as font_file:
+                            font = bytearray(font_file.read())
+                            for char in range(32, 127):
+                                self.char_cols[chr(char)] = []
+                                # Store the byte representation for each column
+                                for col in range(8):
+                                    self.char_cols[chr(char)].append(
+                                        font[(char-32)*8 + col])
+                    except FileNotFoundError:
                         print(FILE_EXCEPTION_WARNING)
-                    finally:
-                        font_file.close()
 
 
-class PiicoDev_SSD1306(framebuf.FrameBuffer):
-    def init_display(self):
+class PiicoDev_SSD1306(Framebuf.FrameBuffer):
+
+    def __init__(self):
+        super().__init__()
         # NOTE: self.width and self.height are largely unused in this implementation <- potential optimization improvement
         self.width = WIDTH
         self.height = HEIGHT
         self.pages = HEIGHT // PAGE_EDGE
         self.buffer = bytearray(self.pages * WIDTH)
+        self.comms_err = False
+
+    def init_display(self):
+        """
+        Initialize display by calling commands sequentially
+        """
         for cmd in (
             # display off
             _SET_DISP,
@@ -242,36 +256,61 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
             self.write_cmd(cmd)
 
     def poweroff(self):
+        """
+        Call poweroff command _SET_DISP
+        """
         self.write_cmd(_SET_DISP)
 
     def poweron(self):
+        """
+        Call poweron command _SET_DISP | 0x01
+        """
         self.write_cmd(_SET_DISP | 0x01)
 
-    def setContrast(self, contrast):
+    def set_contrast(self, contrast):
+        """
+        Set a new constrast value
+        """
         self.write_cmd(_SET_CONTRAST)
         self.write_cmd(contrast)
 
     def invert(self, invert):
+        """
+        Call invert (pixel on-off values) on display '_SET_NORM_INV | (invert & 1)'
+        """
         self.write_cmd(_SET_NORM_INV | (invert & 1))
 
+    # ! Note for reviewer, is this Radians, or Degrees? This can be specified in the docstring
     def rotate(self, rotate):
+        """
+        Remap pixels rotating (in degrees) about the center of the display
+        """
         self.write_cmd(_SET_COM_OUT_DIR | ((rotate & 1) << 3))
         self.write_cmd(_SET_SEG_REMAP | (rotate & 1))
 
     def show(self):
-        self.write_cmd(_SET_COL_ADDR)
-        self.write_cmd(0)  # set row start
-        self.write_cmd(WIDTH - 1)  # set row end
-        self.write_cmd(_SET_PAGE_ADDR)
-        self.write_cmd(0)  # set page start
-        self.write_cmd(self.pages - 1)  # set page end
-        self.write_data(self.buffer)
+        """
+        Execute commands to show the content (in self.buffer) on the display
+        """
+        for cmd in (
+            _SET_COL_ADDR,
+            0,
+            WIDTH - 1,
+            _SET_PAGE_ADDR,
+            0,
+            self.pages - 1,
+            self.buffer
+        ):
+            self.write_cmd(cmd)
 
     def write_cmd(self, cmd):
+        """
+        Write formal param cmd to i2c bus on self.addr
+        """
         try:
             self.i2c.writeto_mem(self.addr, BUFFER_START_ADDR, bytes([cmd]))
             self.comms_err = False
-        except:
+        except:  # TODO: Confirm which exception is thrown by i2c.writeto_mem and call except ExceptionType: specifically, calling try with hanging except is bad practice
             print(i2c_err_str.format(self.addr))
             self.comms_err = True
 
@@ -284,73 +323,103 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
             self.i2c.writeto_mem(self.addr, int.from_bytes(
                 self.write_list[0], 'big'), self.write_list[1])
             self.comms_err = False
-        except:
+        except:  # TODO: Confirm which exception is thrown by i2c.writeto_mem and call except ExceptionType: specifically, calling try with hanging except is bad practice
             print(i2c_err_str.format(self.addr))
             self.comms_err = True
 
+    # TODO: name t is unclear, given the comparison another 10 lines down I suspect this is a border or fill of some description?
     def circ(self, x, y, r, t=1, c=1):
+        """
+        Draw a circle with center (x, y) with radius r
+        """
         for i in range(x-r, x+r+1):
             for j in range(y-r, y+r+1):
-                if t == 1:
+                if t:
                     if((i-x)**2 + (j-y)**2 < r**2):
                         self.pixel(i, j, 1)
                 else:
                     if((i-x)**2 + (j-y)**2 < r**2) and ((i-x)**2 + (j-y)**2 >= (r-r*t-1)**2):
                         self.pixel(i, j, c)
 
-    def arc(self, x, y, r, stAng, enAng, t=0, c=1):
+    # TODO: This should have a docstring and the naming conventions aren't clear
+    def arc(self, x, y, r, st_ang, en_ang, t=0, c=1):
         for i in range(r*(1-t)-1, r):
-            for ta in range(stAng, enAng, 1):
+            for ta in range(st_ang, en_ang, 1):
                 X = int(i*cos(radians(ta)) + x)
                 Y = int(i*sin(radians(ta)) + y)
                 self.pixel(X, Y, c)
 
+    # ! TODO: This docstring can be more useful, personally
+    # ! I find the naming conventions are also a little unclear,
+    # ! but that is a personal preference
     def load_pbm(self, filename, c):
-        with open(filename, 'rb') as f:
-            line = f.readline()
-            if line.startswith(b'P4') is False:
-                print('Not a valid pbm P4 file')
-                return
-            line = f.readline()
-            while line.startswith(b'#') is True:
-                line = f.readline()
-            data_piicodev = bytearray(f.read())
-        for byte in range(WIDTH // PAGE_EDGE * HEIGHT):
-            for bit in range(PAGE_EDGE):
-                if data_piicodev[byte] & 1 << bit != 0:
-                    x_coordinate = ((8-bit) + (byte * 8)) % WIDTH
-                    y_coordinate = byte * 8 // WIDTH
-                    if x_coordinate < WIDTH and y_coordinate < HEIGHT:
-                        self.pixel(x_coordinate, y_coordinate, c)
+        """
+        Load a specified PBM file into the display buffer
+        """
+        try:
+            with open(filename, 'rb') as file:
+                line = file.readline()
+                if line.startswith(b'P4') is False:
+                    print('Not a valid pbm P4 file')
+                    return
+                line = file.readline()
+                while line.startswith(b'#') is True:
+                    line = file.readline()
+                data_piicodev = bytearray(file.read())
+            for byte in range(WIDTH // PAGE_EDGE * HEIGHT):
+                for bit in range(PAGE_EDGE):
+                    if data_piicodev[byte] & 1 << bit != 0:
+                        x_coord = ((8-bit) + (byte * 8)) % WIDTH
+                        y_coord = byte * 8 // WIDTH
+                        # ! NOTE for reviwer: An idea would be to wrapper this condition into pixel,
+                        # ! I've noticed this is called a few times in this implementation and shouldn't
+                        # ! be much slower if it is in pixel
+                        if x_coord < WIDTH and y_coord < HEIGHT:
+                            self.pixel(x_coord, y_coord, c)
+        except FileNotFoundError:
+            print(FILE_EXCEPTION_WARNING)
 
-    class graph2D:
-        def __init__(self, originX=0, originY=HEIGHT-1, width=WIDTH, height=HEIGHT, minValue=0, maxValue=255, c=1, bars=False):
-            self.minValue = minValue
-            self.maxValue = maxValue
-            self.originX = originX
-            self.originY = originY
+    class Graph2D:
+        """
+        TODO: Should have a docstring for the class here to define its usage
+        """
+
+        def __init__(self, origin_x=0, origin_y=HEIGHT-1, width=WIDTH, height=HEIGHT, min_value=0, max_value=255, c=1, bars=False):
+            # ! NOTE for reviewer: we've got 11 instance variables here (and nine formal params in init) for a single public method.
+            # ! This can be refactored into an object or similar to reduce code complexity
+            self.min_value = min_value
+            self.max_value = max_value
+            self.origin_x = origin_x
+            self.origin_y = origin_y
             self.width = width
             self.height = height
             self.c = c
-            self.m = (1-height)/(maxValue-minValue)
-            self.offset = originY-self.m*minValue
+            self.m = (1-height)/(max_value-min_value)
+            self.offset = origin_y-self.m*min_value
             self.bars = bars
             self.data = []
 
-    def updateGraph2D(self, graph, value):
+    # ! NOTE for reviwer: renamed from updateGraph2D to meet snake case
+    # ! and because the class itself is defined as a 2D graph this method
+    # ! can simply be named update
+    def update(self, graph, value):
+        """
+        TODO: Include a docstring for this method (my suggestion is to define what the formal parameter graph is for, seems like the formal parameters are being manipulated as a shallow copy here)
+        """
         graph.data.insert(0, value)
         if len(graph.data) > graph.width:
             graph.data.pop()
-        x = graph.originX+graph.width-1
+        x = graph.origin_x+graph.width-1
         m = graph.c
+        # ! NOTE for reviewer: bad practice using the same name for a variable as the formal parameter value
         for value in graph.data:
             y = round(graph.m*value + graph.offset)
-            if graph.bars == True:
-                for idx in range(y, graph.originY+1):
-                    if x >= graph.originX and x < graph.originX+graph.width and idx <= graph.originY and idx > graph.originY-graph.height:
+            if graph.bars:
+                for idx in range(y, graph.origin_y+1):
+                    if graph.origin_x <= x < graph.origin_x+graph.width and graph.origin_y-graph.height < idx <= graph.origin_y:
                         self.pixel(x, idx, m)
             else:
-                if x >= graph.originX and x < graph.originX+graph.width and y <= graph.originY and y > graph.originY-graph.height:
+                if graph.origin_x <= x < graph.origin_x+graph.width and graph.origin_y-graph.height < y <= graph.origin_y:
                     self.pixel(x, y, m)
             x -= 1
 
@@ -362,7 +431,7 @@ class PiicoDev_SSD1306_MicroPython(PiicoDev_SSD1306):
         self.temp = bytearray(2)
         self.write_list = [b'\x40', None]  # Co=0, D/C#=1
         self.init_display()
-        super().__init__(self.buffer, WIDTH, HEIGHT, framebuf.MONO_VLSB)
+        super().__init__(self.buffer, WIDTH, HEIGHT, Framebuf.MONO_VLSB)
         self.fill(0)
         self.show()
 
@@ -390,29 +459,38 @@ class PiicoDev_SSD1306_Linux(PiicoDev_SSD1306):
 
 
 def create_PiicoDev_SSD1306(addr=None, bus=None, freq=None, sda=None, scl=None, addr_switch=None):
+    """
+    Factory-Pattern to create a PiicoDev_SSD1306 object of
+    the appropriate type based on the system type
+    """
     addr = determine_addr(addr, addr_switch)
     check_compatibility()
+
     if _SYSNAME == 'microbit':
         return PiicoDev_SSD1306_MicroBit(addr=addr, freq=freq)
+
     if _SYSNAME == 'linux':
         return PiicoDev_SSD1306_Linux(addr=addr, freq=freq)
+
     return PiicoDev_SSD1306_MicroPython(addr=addr, bus=bus, freq=freq, sda=sda, scl=scl)
 
 
 def determine_addr(addr, addr_switch):
-    if addr == None:
+    """
+    Return the default address to use based on
+    function parameters unless it is overridden by addr
+    (or the address switch is declared high)
+    """
+    if addr is None:
         if addr_switch == 1 | addr_switch == True:
             return DEFAULT_ADDR + 1
-        else:
-            return DEFAULT_ADDR
+        return DEFAULT_ADDR
     return addr
 
 
 def check_compatibility():  # See PiicoDev_Unified.py
-    try:
-        if compat_ind >= 1:
-            pass
-        else:
-            print(COMPATIBILITY_WARNING)
-    except:
-        print(COMPATIBILITY_WARNING)
+    """
+    Prints an error message if the compatible index is incorrect in Unified
+    """
+    if compat_ind < 1:
+        print('\nUnified PiicoDev library out of date. Get the latest module: https://piico.dev/unified\n')
