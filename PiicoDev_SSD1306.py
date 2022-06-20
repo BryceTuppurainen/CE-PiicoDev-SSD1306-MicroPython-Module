@@ -14,6 +14,7 @@
 from math import cos, sin, radians
 from nis import match
 from construct import Switch
+from numpy import character
 
 from requests import check_compatibility
 from PiicoDev_Unified import *
@@ -79,7 +80,7 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                     for i in range(len(self.buffer)):
                         self.buffer[i] = 0xFF
 
-            def pixel(self, x, y, c):
+            def pixel(self, x, y, c=1):
                 x = x & (WIDTH - 1)
                 y = y & (HEIGHT - 1)
                 page, offset = divmod(y, PAGE_EDGE)
@@ -91,8 +92,8 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                 pack_into(">B", self.buffer, i, b)
                 self._set_pos(x, page)
 
-            def line(self, x1, y1, x2, y2, c):
-                # bresenham
+            def line(self, x1, y1, x2, y2, c=1):
+                # author: Bresenham
                 steep = abs(y2-y1) > abs(x2-x1)
 
                 if steep:
@@ -135,10 +136,12 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                         err += dx
                     x1 += 1
 
-            def hline(self, x, y, l, c):
+            # From left-most point (x,y) draw a line right of length l
+            def hline(self, x, y, l, c=1):
                 self.line(x, y, x + l, y, c)
 
-            def vline(self, x, y, h, c):
+            # From top-most point (x,y) draw a line down of height h
+            def vline(self, x, y, h, c=1):
                 self.line(x, y, x, y + h, c)
 
             # Draw the perimeter of a rectangle to the display
@@ -153,57 +156,61 @@ if _SYSNAME == 'microbit' or _SYSNAME == 'Linux':
                 for i in range(y, y + h):
                     self.hline(x, i, w, c)
 
-            # NOTE: formal params x and y are offsets from the top left corner of the screen
-            # TODO(Bryce): time complexity of barometer statement if (page_pixel_values & 1 << i):
-            # TODO(Bryce): Is O((text length) * PAGE_EDGE * 7), OHM((text length) * PAGE_EDGE * 7) which is highly inefficient
-            # TODO(Bryce WIP)
             def text(self, text, x, y, c=1):
-                if self.character_representations is None:
-                    self.get_character_representations()
+                self.get_char_cols()
+                text_columns = []
+                for char in text:
+                    text_columns.append(
+                        self.char_cols[char])
+                for cx, column in enumerate(text_columns):
+                    for cy in range(PAGE_EDGE):
+                        if x + cx < WIDTH and y + cy < HEIGHT and column & 1 << cy:
+                            self.pixel(x + cx, y + cy, c)
 
-                for char in text:  # For each character
-                    character_pixels = self.character_representations[ord(
-                        char)]
-                    for i in range(7):
-                        if (character_pixels & 1 << i):
-                            x_coordinate = x + col + text_index * 8
-                            y_coordinate = y + i
-                            if x_coordinate < WIDTH and y_coordinate < HEIGHT:
-                                self.pixel(x_coordinate, y_coordinate, c)
-
-            # Stores the bytearray representations for each legal character mapped in the object character_representations
-            def get_character_representations(self):
-                self.character_representations = {}
+            # Stores the bytearray representations for each legal character mapped in the object char_cols
+            def get_char_cols(self):
                 try:
-                    fontFile = open("font-pet-me-128.dat", "rb")
-                except:
-                    print(FILE_EXCEPTION_WARNING)
-                font = bytearray(fontFile.read())
-                for char in range(32, 126):
-                    for col in range(8):
-                        self.character_representations[char] = font[(
-                            char-32)*8 + col]
-                fontFile.close()
+                    self.char_cols
+                except NameError:  # If char_cols is not yet initialized, then initialize it, otherwise do nothing i.e. a Python is_defined Singleton pattern
+                    self.char_cols = {}
+                    try:
+                        font_file = open("font-pet-me-128.dat", "rb")
+                        font = bytearray(font_file.read())
+                        for char in range(32, 127):
+                            self.char_cols[chr(char)] = []
+                            # Store the byte representation for each column
+                            for col in range(8):
+                                self.char_cols[chr(char)].append(
+                                    font[(char-32)*8 + col])
+                    except:
+                        print(FILE_EXCEPTION_WARNING)
+                    finally:
+                        font_file.close()
 
 
 class PiicoDev_SSD1306(framebuf.FrameBuffer):
     def init_display(self):
-        # NOTE: self.width and self.height are largely unused in this implementation
+        # NOTE: self.width and self.height are largely unused in this implementation <- potential optimization improvement
         self.width = WIDTH
         self.height = HEIGHT
         self.pages = HEIGHT // PAGE_EDGE
         self.buffer = bytearray(self.pages * WIDTH)
         for cmd in (
-            _SET_DISP,  # display off
+            # display off
+            _SET_DISP,
             # address setting
             _SET_MEM_ADDR,
-            0x00,  # horizontal
+            # horizontal
+            0x00,
             # resolution and layout
-            _SET_DISP_START_LINE,  # start at line 0
-            _SET_SEG_REMAP | 0x01,  # column addr 127 mapped to SEG0
+            # start at line 0
+            _SET_DISP_START_LINE,
+            # column addr 127 mapped to SEG0
+            _SET_SEG_REMAP | 0x01,
             _SET_MUX_RATIO,
             HEIGHT - 1,
-            _SET_COM_OUT_DIR | 0x08,  # scan from COM[N] to COM0
+            # scan from COM[N] to COM0
+            _SET_COM_OUT_DIR | 0x08,
             _SET_DISP_OFFSET,
             0x00,
             _SET_COM_PIN_CFG,
@@ -213,20 +220,25 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
             0x80,
             _SET_PRECHARGE,
             0xF1,
+            # set 0.83*Vcc
             _SET_VCOM_DESEL,
-            0x30,  # 0.83*Vcc
-            # display
+            0x30,
+            # set display constrast to maximum
             _SET_CONTRAST,
-            0xFF,  # maximum
-            _SET_ENTIRE_ON,  # output follows RAM contents
-            _SET_NORM_INV,  # not inverted
+            0xFF,
+            # output follows RAM contents
+            _SET_ENTIRE_ON,
+            # display is not inverted
+            _SET_NORM_INV,
+            # enable internal IREF during display
             _SET_IREF_SELECT,
-            0x30,  # enable internal IREF during display on
+            0x30,
             # charge pump
             _SET_CHARGE_PUMP,
             0x14,
-            _SET_DISP | 0x01,  # display on
-        ):  # on
+            # display on
+            _SET_DISP | 0x01,
+        ):
             self.write_cmd(cmd)
 
     def poweroff(self):
@@ -263,8 +275,8 @@ class PiicoDev_SSD1306(framebuf.FrameBuffer):
             print(i2c_err_str.format(self.addr))
             self.comms_err = True
 
-    # ! Mark for reviewer - What is the difference between write_data and write_cmd.
-    # ! The value of write_list[0] is never redefined and equal to BUFFER_START_ADDR,
+    # ! Mark for reviewer - What is the difference between write_data and write_cmd?
+    # ! The value of write_list[0] is never redefined and is equal to BUFFER_START_ADDR,
     # ! other than buf being defined as an element of an array this is identical to write_cmd?
     def write_data(self, buf):
         try:
@@ -396,7 +408,7 @@ def determine_addr(addr, addr_switch):
     return addr
 
 
-def check_compatibility():
+def check_compatibility():  # See PiicoDev_Unified.py
     try:
         if compat_ind >= 1:
             pass
